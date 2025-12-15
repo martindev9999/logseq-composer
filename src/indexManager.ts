@@ -1,14 +1,15 @@
 // File: IndexManager.ts
 
 import { Orama, getByID, remove } from "@orama/orama";
-import { VectorDBSchemaDynamic, useGenerateEmbedding } from "embedManager";
+import { EmbeddingConfig, generateEmbedding } from "embedManager";
 import { VectorDBSchema, batchInsertEmbeddings } from "VectorDBManager";
+import { VectorDBSchemaDynamic } from "types";
 
 let hasHooked = false;
-let currentApiKey = '';
-let currentEmbeddingKey = '';
 let currentOramaInstance: Orama<VectorDBSchema>;
 let indexingInProgress = false;
+let currentEmbeddingConfig: EmbeddingConfig;
+let currentEmbeddingDimension: number | null = null;
 
 const isInternalPage = (name: string) => {
   return name.startsWith('card') ||
@@ -21,9 +22,8 @@ const isInternalPage = (name: string) => {
 };
 
 export async function checkAndIndexUpdatedPages(
-  apiKey: string,
   oramaInstance: Orama<VectorDBSchema>,
-  embeddingApiKey: string
+  embeddingConfig: EmbeddingConfig
 ): Promise<void> {
   if (indexingInProgress) return;
 
@@ -49,7 +49,15 @@ export async function checkAndIndexUpdatedPages(
           }
         }
 
-        const embedding = await useGenerateEmbedding(wholePageContent, embeddingApiKey);
+        const { embedding, dimension } = await generateEmbedding(wholePageContent, embeddingConfig);
+        if (currentEmbeddingDimension !== null && currentEmbeddingDimension !== dimension) {
+          console.warn(
+            `Embedding dimension changed from ${currentEmbeddingDimension} to ${dimension}. ` +
+            'Skipping incremental update; please re-index to rebuild the vector database.',
+          );
+          continue;
+        }
+        currentEmbeddingDimension = currentEmbeddingDimension ?? dimension;
 
         const newEmbedding: VectorDBSchemaDynamic = {
           id: page.id.toString(),
@@ -75,20 +83,18 @@ export async function checkAndIndexUpdatedPages(
 }
 
 export function startPageIndexingOnChange(
-  apiKey: string,
   oramaInstance: Orama<VectorDBSchema>,
-  embeddingApiKey: string
+  embeddingConfig: EmbeddingConfig
 ): void {
-  currentApiKey = apiKey;
-  currentEmbeddingKey = embeddingApiKey;
   currentOramaInstance = oramaInstance;
+  currentEmbeddingConfig = embeddingConfig;
 
   if (hasHooked) return;
   hasHooked = true;
 
   logseq.DB.onChanged(async () => {
     try {
-      await checkAndIndexUpdatedPages(currentApiKey, currentOramaInstance, currentEmbeddingKey);
+      await checkAndIndexUpdatedPages(currentOramaInstance, currentEmbeddingConfig);
     } catch (err) {
       console.error('Error indexing updated pages:', err);
     }

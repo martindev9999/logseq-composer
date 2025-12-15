@@ -13,3 +13,10 @@ export enum TagSortType {
   UsageAsc = 'UsageAsc',
   UsageDesc = 'UsageDesc',
 }
+
+export type VectorDBSchemaDynamic = {
+  id: string;
+  content: string;
+  lastUpdated: number;
+  embedding: number[];
+};

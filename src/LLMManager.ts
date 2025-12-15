@@ -5,9 +5,6 @@ export async function queryLiteLLM(
   apiKey: string,
   endpoint: string
 ): Promise<any> {
-  // Adjust this URL to match your LiteLLM server endpoint.
-  //const endpoint = 'http://localhost:4000/chat/completions';
-
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -17,15 +14,30 @@ export async function queryLiteLLM(
     body: JSON.stringify({
       model: model, // Use the model from settings
       messages: [{ role: 'user', content: query }],
-      "api_key":apiKey
-      
+      api_key: apiKey,
     }),
   });
 
-  if (!response.ok) {
-    throw new Error(`LiteLLM request failed: ${response.status} ${response.statusText}`);
+  let body: any = null;
+  let rawBody: string | null = null;
+  try {
+    body = await response.json();
+  } catch {
+    try {
+      rawBody = await (response as any).text?.();
+    } catch {
+      rawBody = null;
+    }
   }
 
-  const data = await response.json();
-  return data;
+  if (!response.ok) {
+    const errMsg =
+      body?.error?.message ||
+      body?.message ||
+      rawBody ||
+      `${response.status} ${response.statusText}`;
+    throw new Error(`LiteLLM request failed: ${errMsg}`);
+  }
+
+  return body ?? {};
 }

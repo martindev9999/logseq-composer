@@ -1,37 +1,37 @@
 import { create, insert, search } from '@orama/orama';
-import { useGenerateEmbedding } from './useGenerateEmbedding';
-// Define your schema for the documents you want to index
+import { EmbeddingCapableSettings, generateEmbedding, resolveEmbeddingConfig } from '../embedManager';
 
-
-export async function checkIfVectorDBIndexed(embeddingsApiKey: string): Promise<boolean> {
+// Simple smoke check to validate embedding settings and Orama vector flow.
+export async function checkIfVectorDBIndexed(settings: EmbeddingCapableSettings): Promise<boolean> {
   try {
-    // Create an index (or connect to one if you have persistence)
-    const oramaIndex = create({ 
-      schema:{
+    const config = resolveEmbeddingConfig(settings);
+    const first = await generateEmbedding('This is a test note.', config);
+    const dimension = first.dimension;
+
+    const oramaIndex = create({
+      schema: {
         id: 'string',
         content: 'string',
-        // If you have vector embeddings, you can store them as an array
-        embedding: "vector[1536]"
+        embedding: `vector[${dimension}]`,
       },
-      id: "main-orama-db",
-     });
-    console.log('Orama index created:', oramaIndex);
-    const newVector = await useGenerateEmbedding("This is a test note.",embeddingsApiKey);
-    insert(oramaIndex, {
-      content:"This is a test note.",
-      embedding:newVector
+      id: 'main-orama-db',
     });
-    const searchResult = search(oramaIndex, {
-      mode: "vector",
+    insert(oramaIndex, {
+      content: 'This is a test note.',
+      embedding: first.embedding,
+    });
+
+    const probe = await generateEmbedding('This is note.', config);
+    search(oramaIndex, {
+      mode: 'vector',
       vector: {
-        value: await useGenerateEmbedding("This is note.",embeddingsApiKey),
-        property: "embedding",
+        value: probe.embedding,
+        property: 'embedding',
       },
-      similarity: 0.85, // Minimum similarity. Defaults to `0.8`
-      limit: 10, // Defaults to `10`
+      similarity: 0.85,
+      limit: 10,
       offset: 0,
     });
-    console.log(searchResult);
 
     return true;
   } catch (error) {

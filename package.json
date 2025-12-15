@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "author": "Martin Minarik",
   "description": "Plugin that connects all of your notes with any LLM",
-  "main": "index.html",
+  "main": "dist/index.html",
   "effect": "true",
   "sponsors": ["https://buymeacoffee.com/martinminarik"],
   "license": "SEE LICENSE IN LICENSE",
@@ -11,7 +11,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "postbuild": "if [ \"$CI\" != \"true\" ]; then cp -r dist/* ~/.logseq/plugins/logseq-bradder-plugin/; fi",
-    "dev": "yarn && yarn build && yarn postbuild"
+    "dev": "yarn && yarn build && yarn postbuild",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "^6.1.0",
@@ -34,11 +36,13 @@
   "devDependencies": {
     "@types/react": "^17.0.33",
     "@types/react-dom": "^17.0.10",
-    "@vitejs/plugin-react": "^1.0.7",
+    "@vitejs/plugin-react": "^4.2.1",
     "typescript": "^4.5.4",
-    "vite": "^2.7.2",
+    "vite": "^4.5.3",
     "vite-tsconfig-paths": "^3.3.17",
-    "@logseq/libs": "^0.0.1-alpha.29"
+    "@logseq/libs": "^0.0.1-alpha.29",
+    "vitest": "^0.34.6",
+    "@vitest/coverage-v8": "^0.34.6"
   },
   "browserslist": [
     "chrome 80"
