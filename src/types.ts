@@ -20,3 +20,9 @@ export type VectorDBSchemaDynamic = {
   lastUpdated: number;
   embedding: number[];
 };
+
+export type VectorChunk = VectorDBSchemaDynamic & {
+  pageId: string;
+  pageName: string;
+  blockId?: string;
+};

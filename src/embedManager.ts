@@ -1,4 +1,4 @@
-import { VectorDBSchemaDynamic } from 'types';
+import { VectorChunk } from 'types';
 
 export type EmbeddingConfig = {
   endpoint: string;
@@ -155,34 +155,80 @@ export async function generateEmbedding(
     : new Error('Unknown error while generating embedding.');
 }
 
+type ChunkOptions = {
+  maxChunkSize?: number;
+};
+
+function flattenBlock(block: any): string {
+  let result = block.content || '';
+  if (block.children && Array.isArray(block.children)) {
+    for (const child of block.children) {
+      result += `\n- ${flattenBlock(child)}`;
+    }
+  }
+  return result;
+}
+
+function chunkText(text: string, maxChunkSize: number): string[] {
+  if (text.length <= maxChunkSize) return [text];
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += maxChunkSize) {
+    chunks.push(text.slice(i, i + maxChunkSize));
+  }
+  return chunks;
+}
+
+function getBlockIdentifier(block: any, fallback: string): string {
+  if (typeof block?.uuid === 'string') return block.uuid;
+  if (block?.uuid?.$uuid$) return block.uuid.$uuid$;
+  if (block?.id != null) return String(block.id);
+  return fallback;
+}
+
 export async function getEmbeddingsAllNotes(
   config: EmbeddingConfig,
-): Promise<{ embeddings: VectorDBSchemaDynamic[]; dimension: number }> {
+  options: ChunkOptions = {},
+): Promise<{ embeddings: VectorChunk[]; dimension: number }> {
+  const maxChunkSize = options.maxChunkSize ?? 800;
   const pages = (await logseq.Editor.getAllPages()) ?? [];
-  const allNotesEmbeddings: VectorDBSchemaDynamic[] = [];
+  const allChunks: VectorChunk[] = [];
   let firstDimension: number | null = null;
 
   for (const page of pages) {
     const pagecontent = await logseq.Editor.getPageBlocksTree(page.uuid);
-    let wholePageContent = `note_id: ${page.id}\nnote_name: ${page.name}\nnote_content: \n\n`;
-
-    for (const element of pagecontent) {
-      wholePageContent = `${wholePageContent}- ${element.content}\n`;
-    }
+    let blockIndex = 0;
 
     try {
-      const { embedding, dimension } = await generateEmbedding(wholePageContent, config, {
-        retries: 1,
-      });
-      if (firstDimension == null) {
-        firstDimension = dimension;
+      for (const block of pagecontent) {
+        const flattened = flattenBlock(block).trim();
+        if (!flattened) {
+          blockIndex++;
+          continue;
+        }
+        const blockRef = getBlockIdentifier(block, `block-${blockIndex}`);
+        const chunks = chunkText(flattened, maxChunkSize);
+
+        for (let idx = 0; idx < chunks.length; idx++) {
+          const chunkContent = `page: ${page.name}\nblock: ${blockRef}\n${chunks[idx]}`;
+          const { embedding, dimension } = await generateEmbedding(chunkContent, config, {
+            retries: 1,
+          });
+          if (firstDimension == null) {
+            firstDimension = dimension;
+          }
+
+          allChunks.push({
+            id: `${page.id}-${blockRef}-${idx}`,
+            pageId: page.id.toString(),
+            pageName: page.name,
+            blockId: blockRef,
+            lastUpdated: page.updatedAt ?? 0,
+            content: chunkContent,
+            embedding,
+          });
+        }
+        blockIndex++;
       }
-      allNotesEmbeddings.push({
-        id: page.id.toString(),
-        lastUpdated: page.updatedAt ?? 0,
-        content: wholePageContent,
-        embedding,
-      });
     } catch (err) {
       console.error('Embedding failed for page:', page.name, err);
       // Skip this page but continue indexing others.
@@ -194,5 +240,5 @@ export async function getEmbeddingsAllNotes(
     throw new Error('No embeddings were generated. Verify your embedding settings.');
   }
 
-  return { embeddings: allNotesEmbeddings, dimension: firstDimension };
+  return { embeddings: allChunks, dimension: firstDimension };
 }

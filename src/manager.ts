@@ -18,10 +18,10 @@ export async function indexEntireLogSeq(settings: IPluginSettings) {
 
 export async function enableAutoIndexer(settings: IPluginSettings) {
   const embeddingConfig = resolveEmbeddingConfig(settings);
-  const oramaDatabaseInstance = await loadVectorDatabase(settings, {
+  await loadVectorDatabase(settings, {
     dimension: settings.VectorDBDimension,
   });
-  startPageIndexingOnChange(oramaDatabaseInstance, embeddingConfig);
+  startPageIndexingOnChange(settings, embeddingConfig);
 }
 
 export async function handleQuery(query: string, settings: IPluginSettings): Promise<string> {
@@ -129,7 +129,9 @@ async function collectVectorContext(
   let context = "";
   if (vectorResult.hits && vectorResult.hits.length > 0) {
     vectorResult.hits.forEach((hit: any) => {
-      context += hit.document.content + "\n\n";
+      const pageName = hit.document.pageName ? `Page: ${hit.document.pageName}\n` : '';
+      const blockLabel = hit.document.blockId ? `Block: ${hit.document.blockId}\n` : '';
+      context += `${pageName}${blockLabel}${hit.document.content}\n\n`;
     });
   }
   return { context, hits: vectorResult.hits?.length ?? 0 };

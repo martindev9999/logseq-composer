@@ -1,11 +1,14 @@
 import { create, insertMultiple, type Orama, search } from "@orama/orama";
 import { persist, restore } from "@orama/plugin-data-persistence";
-import { VectorDBSchemaDynamic } from "types";
+import { VectorChunk } from "types";
 
 export type VectorDBSchema = {
   id: 'string';
   lastUpdated: 'number';
   content: 'string';
+  pageId: 'string';
+  pageName: 'string';
+  blockId: 'string';
   embedding: `vector[${number}]`;
 };
 
@@ -13,6 +16,8 @@ type LoadVectorDBOptions = {
   forceNew?: boolean;
   dimension?: number;
 };
+
+const VECTOR_DB_SCHEMA_VERSION = 2;
 
 export async function loadVectorDatabase(
   settings: any,
@@ -27,18 +32,24 @@ export async function loadVectorDatabase(
         id: 'string',
         lastUpdated: 'number',
         content: 'string',
+        pageId: 'string',
+        pageName: 'string',
+        blockId: 'string',
         embedding: `vector[${dim}]`,
       },
       id: 'main-orama-db',
     });
   }
 
-  if (!settings.VectorDBLogseqCopilot || settings.VectorDBLogseqCopilot === '' || options.forceNew) {
+  const schemaMismatch = settings.VectorDBSchemaVersion !== VECTOR_DB_SCHEMA_VERSION;
+
+  if (!settings.VectorDBLogseqCopilot || settings.VectorDBLogseqCopilot === '' || options.forceNew || schemaMismatch) {
     const freshDB = await createNewDatabase(desiredDimension);
     const jsonIndex = await persist(freshDB, 'json');
     await logseq.updateSettings({
       VectorDBLogseqCopilot: jsonIndex,
       VectorDBDimension: desiredDimension,
+      VectorDBSchemaVersion: VECTOR_DB_SCHEMA_VERSION,
     });
     oramaInstance = await restore('json', jsonIndex);
   }
@@ -57,6 +68,7 @@ export async function loadVectorDatabase(
         await logseq.updateSettings({
           VectorDBLogseqCopilot: jsonIndex,
           VectorDBDimension: desiredDimension,
+          VectorDBSchemaVersion: VECTOR_DB_SCHEMA_VERSION,
         });
         oramaInstance = await restore('json', jsonIndex);
       }
@@ -68,6 +80,7 @@ export async function loadVectorDatabase(
       await logseq.updateSettings({
         VectorDBLogseqCopilot: jsonIndex,
         VectorDBDimension: desiredDimension,
+        VectorDBSchemaVersion: VECTOR_DB_SCHEMA_VERSION,
       });
       oramaInstance = await restore('json', jsonIndex);
     }
@@ -78,7 +91,7 @@ export async function loadVectorDatabase(
 
 export async function batchInsertEmbeddings(
   oramaDBInstance: Orama<VectorDBSchema>,
-  Embedings: VectorDBSchemaDynamic[],
+  Embedings: VectorChunk[],
 ) {
   insertMultiple(oramaDBInstance, Embedings);
   const jsonIndex = await persist(oramaDBInstance, 'json');
