@@ -42,6 +42,13 @@ const settings: SettingSchemaDesc[] = [
     default: 'sk-proj-1234',
   },
   {
+    key: 'advancedHeading',
+    type: 'heading',
+    title: 'Advanced',
+    description: 'Only change these settings if you are confident you know what they do.',
+    default: '',
+  },
+  {
     key: 'useLLMKeyForEmbeddings',
     type: 'boolean',
     title: 'Advanced — use chat API key for embeddings',
