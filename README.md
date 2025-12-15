@@ -46,12 +46,6 @@ You can configure these in the Logseq plugin UI:
   - The word `"context"` inside your prompt is replaced by the text content pulled from your notes (via vector search or current page).  
   - Default is tuned for productivity, but you can customize it for different LLM personalities or task types.
 
-- **`EmbeddingApiKey`**  
-  - Used for generating vector embeddings of your notes (for semantic search).  
-  - Currently only supports OpenAI’s `text-embedding-ada-002` model.  
-  - If not set, vector search is skipped and only the current Logseq note is passed as context.  
-  - You do **not** need this if you're okay with simpler functionality.
-
 - **`LiteLLMLink`**   
   - The full endpoint to your LiteLLM instance.  
   - Default value:  
@@ -60,12 +54,21 @@ You can configure these in the Logseq plugin UI:
     ```
   - This is a public instance that forwards your request to the correct provider (OpenAI, Google, etc.) using your API key.  
   - You can self-host [LiteLLM](https://github.com/BerriAI/litellm) for full control or privacy — just set your own URL here.
-
+ 
 - **`apiKey`**  
   - The API key used to authenticate your request with the actual LLM provider (OpenAI, Anthropic, Google, etc.).  
   - This key is passed to LiteLLM which handles routing and forwarding it properly.  
   - **Keep this secure**, especially if using shared or public LiteLLM endpoints.
 
+#### Advanced
+
+- **`EmbeddingApiKey`**  
+  - Used for generating vector embeddings of your notes (for semantic search).  
+  - Currently only supports OpenAI’s `text-embedding-ada-002` model.  
+  - If not set, vector search is skipped and only the current Logseq note is passed as context.  
+  - You do **not** need this if you're okay with simpler functionality.
+
+- 
 ---
 
 ### 📦 Installation
