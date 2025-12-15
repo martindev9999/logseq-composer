@@ -1,21 +1,13 @@
 {
+  "id": "logseq-composer",
   "name": "logseq-composer",
-  "version": "v0.0.1",
+  "title": "Logseq Composer",
+  "version": "0.0.1",
   "author": "Martin Minarik",
-  "main": "index.html",
-  "effect":"true",
-  "sponsors":["https://buymeacoffee.com/martinminarik"],
   "description": "Plugin that connects all of your notes with any LLM",
-  "license": "SEE LICENSE IN LICENSE",
-  "devDependencies": {
-    "@logseq/libs": "^0.0.1-alpha.29"
-  },
-  "browserslist": [
-    "chrome 80"
-  ],
-  "logseq": {
-    "id": "logseq-composer",
-    "title":"Logseq Composer",
-    "icon": "logseq.png"
-  }
+  "main": "dist/index.html",
+  "icon": "logseq.png",
+  "effect": true,
+  "sponsors": ["https://buymeacoffee.com/martinminarik"],
+  "license": "SEE LICENSE IN LICENSE"
 }

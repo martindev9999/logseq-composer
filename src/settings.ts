@@ -28,13 +28,6 @@ const settings: SettingSchemaDesc[] = [
     default: 'You are an AI assistant built into LogSeq. answer based on context. newer context takes priority',
   },
   {
-    key: 'EmbeddingApiKey',
-    type: 'string',
-    title: 'Embedding AI ApiKey',
-    description: 'api key passed to embedding model. (for now only openai\'s "text-embedding-ada-002" model is supported)',
-    default: 'sk-proj-1234',
-  },
-  {
     key: 'LiteLLMLink',
     type: 'string',
     title: 'LiteLLM api link',
@@ -47,6 +40,55 @@ const settings: SettingSchemaDesc[] = [
     title: 'API Key',
     description: 'Enter your API key for the service',
     default: 'sk-proj-1234',
+  },
+  {
+    key: 'advancedHeading',
+    type: 'heading',
+    title: 'Advanced',
+    description: 'Only change these settings if you are confident you know what they do.',
+    default: '',
+  },
+  {
+    key: 'useLLMKeyForEmbeddings',
+    type: 'boolean',
+    title: 'Advanced — use chat API key for embeddings',
+    description: 'Recommended: Leave enabled so that the API key you set for chat/LLM calls determines the embedding setting. Turn off only if you need to define a different embedding model.',
+    default: true,
+  },
+  {
+    key: 'EmbeddingApiKey',
+    type: 'string',
+    title: 'Embedding API key override',
+    description: 'Leave blank to reuse the chat API key. Provide only if your embedding provider needs a different key.',
+    default: '',
+  },
+  {
+    key: 'embeddingModel',
+    type: 'string',
+    title: 'Embedding model',
+    description: 'Model identifier sent to the embedding endpoint (e.g. "text-embedding-3-small" or provider-specific name).',
+    default: 'text-embedding-3-small',
+  },
+  {
+    key: 'embeddingEndpoint',
+    type: 'string',
+    title: 'Embedding endpoint',
+    description: 'Full URL for embeddings (LiteLLM /embeddings or provider-native endpoint). Defaults to a LiteLLM endpoint so it mirrors your chat setup.',
+    default: 'http://172.105.80.74:4000/embeddings',
+  },
+  {
+    key: 'embeddingAuthHeader',
+    type: 'string',
+    title: 'Embedding auth header',
+    description: 'HTTP header used for embedding auth. Most providers use "Authorization".',
+    default: 'Authorization',
+  },
+  {
+    key: 'embeddingAuthScheme',
+    type: 'string',
+    title: 'Embedding auth scheme/prefix',
+    description: 'Text prepended before the embedding key (e.g. "Bearer"). Leave empty to send the raw key.',
+    default: 'Bearer',
   }
 ];
 

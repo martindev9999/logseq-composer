@@ -1,0 +1,150 @@
+# litellm_config.yaml
+# Sane modern default: GPT-5.1 family + a few 4.x + tools.
+
+general_settings:
+  timeout: 600
+  temperature: 0.2
+#  allow_client_side_credentials: true
+  pass_through_api_key: true
+
+model_list:
+  ###########################################################
+  # CORE GENERAL / REASONING MODELS
+  ###########################################################
+
+  # Newest flagship – use this by default for “hard stuff”
+  - model_name: gpt-5.1
+    litellm_params:
+      model: openai/gpt-5.1
+
+  # Previous flagship + cheaper variants
+  - model_name: gpt-5
+    litellm_params:
+      model: openai/gpt-5
+
+  - model_name: gpt-5-mini
+    litellm_params:
+      model: openai/gpt-5-mini
+
+  - model_name: gpt-5-nano
+    litellm_params:
+      model: openai/gpt-5-nano
+
+  # Smartest non-reasoning models (great for fast normal chat)
+  - model_name: gpt-4.1
+    litellm_params:
+      model: openai/gpt-4.1
+
+  - model_name: gpt-4.1-mini
+    litellm_params:
+      model: openai/gpt-4.1-mini
+
+  # 4o “omni” line – good default if you want cheaper, fast, multi-modal
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+
+  # o-series reasoning models (kept small)
+  - model_name: o3
+    litellm_params:
+      model: openai/o3
+
+  - model_name: o4-mini
+    litellm_params:
+      model: openai/o4-mini
+
+  ###########################################################
+  # CODING-FOCUSED VARIANTS
+  ###########################################################
+
+  - model_name: gpt-5.1-codex-max
+    litellm_params:
+      model: openai/gpt-5.1-codex-max
+
+  - model_name: gpt-5.1-codex-mini
+    litellm_params:
+      model: openai/gpt-5.1-codex-mini
+
+  - model_name: gpt-5-codex
+    litellm_params:
+      model: openai/gpt-5-codex
+
+  ###########################################################
+  # REALTIME / AUDIO
+  ###########################################################
+
+  # General realtime text+audio
+  - model_name: gpt-realtime
+    litellm_params:
+      model: openai/gpt-realtime
+
+  - model_name: gpt-realtime-mini
+    litellm_params:
+      model: openai/gpt-realtime-mini
+
+  # General audio in/out (chat completions style)
+  - model_name: gpt-audio
+    litellm_params:
+      model: openai/gpt-audio
+
+  - model_name: gpt-audio-mini
+    litellm_params:
+      model: openai/gpt-audio-mini
+
+  # Classic STT / TTS for when you want explicit control
+  - model_name: whisper-1
+    litellm_params:
+      model: openai/whisper-1
+
+  - model_name: tts-1
+    litellm_params:
+      model: openai/tts-1
+
+  ###########################################################
+  # IMAGES
+  ###########################################################
+
+  - model_name: gpt-image-1
+    litellm_params:
+      model: openai/gpt-image-1
+
+  - model_name: gpt-image-1-mini
+    litellm_params:
+      model: openai/gpt-image-1-mini
+
+  ###########################################################
+  # EMBEDDINGS & MODERATION
+  ###########################################################
+
+  - model_name: text-embedding-3-small
+    litellm_params:
+      model: openai/text-embedding-3-small
+
+  - model_name: text-embedding-3-large
+    litellm_params:
+      model: openai/text-embedding-3-large
+
+  - model_name: omni-moderation-latest
+    litellm_params:
+      model: openai/omni-moderation-latest
+
+  - model_name: text-embedding-ada-002
+    litellm_params:
+      model: openai/text-embedding-ada-002
+
+  - model_name: omni-moderation
+    litellm_params:
+      model: openai/omni-moderation
+
+  ###########################################################
+  # SPECIALIZED TOOLS
+  ###########################################################
+
+  - model_name: computer-use-preview
+    litellm_params:
+      model: openai/computer-use-preview
+

@@ -1,25 +1,30 @@
-import { getEmbedingsAllNotes, useGenerateEmbedding } from 'embedManager';
+import { generateEmbedding, getEmbeddingsAllNotes, resolveEmbeddingConfig } from 'embedManager';
 import { startPageIndexingOnChange } from 'indexManager';
 import { queryLiteLLM } from 'LLMManager';
 import { batchInsertEmbeddings, loadVectorDatabase, vectorSearchOramaDB } from 'VectorDBManager';
+import { IPluginSettings } from './state/settings';
 
 // Global variable to store conversation history
 const conversationHistory: Array<{ role: 'user' | 'assistant', content: string }> = [];
 // Set maximum number of history messages to include in the prompt (e.g., last 6 messages)
 const MAX_HISTORY_LENGTH = 6;
 
-export async function indexEntireLogSeq(settings: any) {
-  const oramaDatabaseInstance = await loadVectorDatabase(settings, true);
-  const AllEmbeddings = await getEmbedingsAllNotes(settings.EmbeddingApiKey);
-  batchInsertEmbeddings(oramaDatabaseInstance, AllEmbeddings);
+export async function indexEntireLogSeq(settings: IPluginSettings) {
+  const embeddingConfig = resolveEmbeddingConfig(settings);
+  const { embeddings, dimension } = await getEmbeddingsAllNotes(embeddingConfig);
+  const oramaDatabaseInstance = await loadVectorDatabase(settings, { forceNew: true, dimension });
+  batchInsertEmbeddings(oramaDatabaseInstance, embeddings);
 }
 
-export async function enableAutoIndexer(settings: any) {
-  const oramaDatabaseInstance = await loadVectorDatabase(settings);
-  startPageIndexingOnChange(settings.apiKey, oramaDatabaseInstance, settings.EmbeddingApiKey);
+export async function enableAutoIndexer(settings: IPluginSettings) {
+  const embeddingConfig = resolveEmbeddingConfig(settings);
+  await loadVectorDatabase(settings, {
+    dimension: settings.VectorDBDimension,
+  });
+  startPageIndexingOnChange(settings, embeddingConfig);
 }
 
-export async function handleQuery(query: string, settings: any): Promise<string> {
+export async function handleQuery(query: string, settings: IPluginSettings): Promise<string> {
   // Add the new user query to the conversation history
   conversationHistory.push({ role: "user", content: query });
 
@@ -27,15 +32,34 @@ export async function handleQuery(query: string, settings: any): Promise<string>
 
   // Wrap vector search in try/catch to prevent indexing issues from blocking LLM query.
   try {
-    const oramaDatabaseInstance = await loadVectorDatabase(settings);
-    const queryEmbedding = await useGenerateEmbedding(query, settings.EmbeddingApiKey);
-    const vectorResult = await vectorSearchOramaDB(oramaDatabaseInstance, queryEmbedding);
-    
-    // Append vector search context if available.
-    if (vectorResult.hits && vectorResult.hits.length > 0) {
-      vectorResult.hits.forEach(hit => {
-        vectorContext += hit.document.content + "\n\n";
+    const embeddingConfig = resolveEmbeddingConfig(settings);
+    let oramaDatabaseInstance = await loadVectorDatabase(settings, {
+      dimension: settings.VectorDBDimension,
+    });
+    const queryEmbedding = await generateEmbedding(query, embeddingConfig);
+    const needsRebuild =
+      settings.VectorDBDimension && settings.VectorDBDimension !== queryEmbedding.dimension;
+
+    if (needsRebuild) {
+      console.warn(
+        `Vector DB dimension (${settings.VectorDBDimension}) differs from embedding dimension (${queryEmbedding.dimension}). Rebuilding vector DB.`,
+      );
+      oramaDatabaseInstance = await loadVectorDatabase(settings, {
+        forceNew: true,
+        dimension: queryEmbedding.dimension,
       });
+    }
+
+    const { context, hits } = await collectVectorContext(
+      oramaDatabaseInstance,
+      queryEmbedding.embedding,
+    );
+    vectorContext = context;
+    console.info(`[composer] Vector search hits: ${hits}`);
+    if (hits === 0) {
+      console.warn(
+        '[composer] No vector hits found for this query. Reindex may be required or similarity is too high.',
+      );
     }
   } catch (err) {
     console.error("Vector search failed, proceeding without additional context:", err);
@@ -97,3 +121,18 @@ export async function handleQuery(query: string, settings: any): Promise<string>
   return assistantResponse;
 }
 
+async function collectVectorContext(
+  oramaDatabaseInstance: any,
+  queryVector: number[],
+): Promise<{ context: string; hits: number }> {
+  const vectorResult = await vectorSearchOramaDB(oramaDatabaseInstance, queryVector);
+  let context = "";
+  if (vectorResult.hits && vectorResult.hits.length > 0) {
+    vectorResult.hits.forEach((hit: any) => {
+      const pageName = hit.document.pageName ? `Page: ${hit.document.pageName}\n` : '';
+      const blockLabel = hit.document.blockId ? `Block: ${hit.document.blockId}\n` : '';
+      context += `${pageName}${blockLabel}${hit.document.content}\n\n`;
+    });
+  }
+  return { context, hits: vectorResult.hits?.length ?? 0 };
+}
