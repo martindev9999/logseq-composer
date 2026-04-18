@@ -67,7 +67,7 @@ const settings: SettingSchemaDesc[] = [
     type: 'string',
     title: 'LiteLLM api link',
     description: 'LiteLLM\'s api endpoint, replace with your own if you want custom models',
-    default: 'http://172.105.80.74:4000/chat/completions',
+    default: 'http://127.0.0.1:4000/chat/completions',
   },
   {
     key: 'apiKey',
@@ -93,6 +93,20 @@ const settings: SettingSchemaDesc[] = [
     default: 'sqlite',
     enumChoices: ['sqlite', 'settings'],
     enumPicker: 'select',
+  },
+  {
+    key: 'autoEmbedEnabled',
+    type: 'boolean',
+    title: 'Auto-Embed on Page Changes',
+    description: 'When enabled, the plugin automatically generates embeddings when pages are edited. Disable to prevent background indexing.',
+    default: true,
+  },
+  {
+    key: 'autoIndexDebounceSeconds',
+    type: 'number',
+    title: 'Auto-Index Debounce (seconds)',
+    description: 'How long to wait after the last page change before auto-indexing starts. Higher values reduce API calls but delay index updates. Minimum 10 seconds.',
+    default: 300,
   }
 ];
 

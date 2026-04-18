@@ -470,3 +470,54 @@ describe('Block metadata methods', () => {
     expect(store.getBlockMetadata('bbb-222')).toBeNull();
   });
 });
+
+// Feature: hnsw-vector-search, getDocumentContent helper
+describe('getDocumentContent', () => {
+  // **Validates: Requirements 8.1**
+
+  let store: SQLiteVectorStore;
+
+  beforeEach(async () => {
+    store = await createInMemoryStore();
+  });
+
+  afterEach(() => {
+    const db = store.db;
+    if (db) db.close();
+  });
+
+  it('returns content for requested document IDs', async () => {
+    await store.upsertDocuments([
+      { id: 'doc-1', content: 'Hello world', lastUpdated: 1, embedding: new Array(1536).fill(0.1) },
+      { id: 'doc-2', content: 'Goodbye world', lastUpdated: 2, embedding: new Array(1536).fill(0.2) },
+      { id: 'doc-3', content: 'Third doc', lastUpdated: 3, embedding: new Array(1536).fill(0.3) },
+    ]);
+
+    const result = store.getDocumentContent(['doc-1', 'doc-3']);
+    expect(result.size).toBe(2);
+    expect(result.get('doc-1')).toBe('Hello world');
+    expect(result.get('doc-3')).toBe('Third doc');
+  });
+
+  it('returns empty Map for empty ids array', () => {
+    const result = store.getDocumentContent([]);
+    expect(result.size).toBe(0);
+  });
+
+  it('returns empty Map when db is null', () => {
+    (store as any)._db = null;
+    const result = store.getDocumentContent(['doc-1']);
+    expect(result.size).toBe(0);
+  });
+
+  it('omits IDs that do not exist in the store', async () => {
+    await store.upsertDocuments([
+      { id: 'doc-1', content: 'Exists', lastUpdated: 1, embedding: new Array(1536).fill(0.1) },
+    ]);
+
+    const result = store.getDocumentContent(['doc-1', 'nonexistent']);
+    expect(result.size).toBe(1);
+    expect(result.get('doc-1')).toBe('Exists');
+    expect(result.has('nonexistent')).toBe(false);
+  });
+});

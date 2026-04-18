@@ -9,7 +9,8 @@ interface IPluginSettings {
   apiKey: string;
   embeddingModel: string;
   VectorDBLogseqCopilot: string;
-
+  autoEmbedEnabled: boolean;
+  autoIndexDebounceSeconds: number;
 }
 
 const settingsChangedEffect: AtomEffect<IPluginSettings> = ({ setSelf }) => {
@@ -24,4 +25,9 @@ export const settingsState = atom<IPluginSettings>({
   key: 'settings',
   default: settings.reduce((result, item) => ({ ...result, [item.key]: item.default }), {}) as IPluginSettings,
   effects: [settingsChangedEffect],
+});
+
+export const aiEditModeState = atom<boolean>({
+  key: 'aiEditMode',
+  default: false,
 });

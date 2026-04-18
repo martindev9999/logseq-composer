@@ -21,11 +21,12 @@ User Query
              ├─────────────┬───────────────┤
              ▼             │               ▼
 ┌──────────────────────┐   │  ┌──────────────────────────┐
-│ 2a. BM25 keyword     │   │  │ 2b. Vector similarity    │  storageProvider.searchByVector()
-│     search            │   │  │     search (brute-force  │
-│     bm25Index.search()│   │  │     cosine similarity)   │
-│     - top 5 results   │   │  │     - threshold: 0.5     │
-└──────────┬────────────┘   │  │     - top 5 results      │
+│ 2a. BM25 keyword     │   │  │ 2b. Vector similarity    │  accelerator.searchByVector()
+│     search            │   │  │     search (HNSW index   │
+│     bm25Index.search()│   │  │     or brute-force       │
+│     - top 5 results   │   │  │     fallback)            │
+└──────────┬────────────┘   │  │     - threshold: 0.5     │
+           │                │  │     - top 5 results      │
            │                │  └────────────┬──────────────┘
            │                │               │
            ▼                │               ▼
@@ -94,12 +95,16 @@ An in-memory `BM25Index` is built from all document content in the SQLite `docum
 
 ### Vector Similarity Search
 
-The `SQLiteVectorStore` reads all rows from the `documents` table, decodes each embedding BLOB to a `Float32Array`, computes cosine similarity in JavaScript, and returns the top-K results.
+The `VectorSearchAccelerator` wraps an in-memory HNSW (Hierarchical Navigable Small World) index built from all embeddings in the SQLite `documents` table at startup. When the HNSW index is ready, queries are routed through it for sub-5ms approximate nearest neighbor search. When the index is not ready (during construction, after an error, or if the WASM backend fails to load), queries fall back transparently to the brute-force cosine similarity scan in `SQLiteVectorStore`.
 
 | Parameter       | Value   | Description                                      |
 |----------------|---------|--------------------------------------------------|
 | similarity     | 0.5     | Minimum cosine similarity threshold               |
 | limit          | 5       | Maximum number of results returned                |
+| efSearch       | 64      | HNSW query-time search depth (controls recall vs speed) |
+| M              | 16      | HNSW graph connectivity (bi-directional links per node) |
+
+The HNSW index is volatile — it lives only in memory and is rebuilt from SQLite on each plugin startup. Incremental updates (add/remove/upsert) keep it synchronized during a session. A full rebuild is triggered automatically when the embedding dimension changes (model switch) or when tombstone accumulation exceeds 20% of capacity.
 
 ### RRF Merging
 
@@ -112,7 +117,8 @@ Both result lists are passed to `mergeWithRRF()`, which fuses them using weighte
 
 ### Fallback Behavior
 
-- If vector search fails → BM25 results only (warning logged)
+- If the HNSW index is not ready → vector search falls back to brute-force cosine similarity in SQLiteVectorStore (warning logged)
+- If vector search fails entirely → BM25 results only (warning logged)
 - If BM25 search fails → vector results only (warning logged)
 - If both fail → empty result array, LLM proceeds without additional context
 
@@ -235,6 +241,36 @@ The retrieval pipeline is wrapped in a try/catch. If any step fails (embedding, 
 
 This means the plugin always works — even without embeddings configured — by falling back to the currently active note as context.
 
+If the user stops indexing mid-run via the stop button, all embeddings generated up to the stop point are persisted in the vector database. Search proceeds with this partial set of embeddings — pages that were not yet indexed at the time of stopping will not appear in vector search results until the next indexing run completes them. This is a graceful degradation: the retrieval pipeline still works and returns results from whatever has been indexed so far, just with potentially incomplete coverage of the user's graph.
+
+## AI Edit Mode
+
+When the user enables the "AI Edit" toggle in the chat toolbar, the query pipeline changes:
+
+1. The current page's block tree is fetched via `getActivePageContext()` and formatted with block UUIDs
+2. An edit-mode system prompt supplement (`buildEditSystemPrompt()`) is appended, instructing the LLM to emit structured edit commands inside ` ```json-edit ` fenced code blocks
+3. The LLM response is parsed by `parseEditCommands()` which extracts and validates commands from json-edit blocks
+4. Valid commands are executed sequentially by `executeAll()` via the Logseq Editor API (`insertBlock`, `updateBlock`, `removeBlock`)
+5. A `ChangeSummary` component displays the results (success/failure counts and per-command details)
+
+### Edit Command Schema
+
+Each command is a JSON object:
+
+| Field | Type | Required For | Description |
+|-------|------|-------------|-------------|
+| `action` | `"insert"` \| `"update"` \| `"delete"` | All | The operation to perform |
+| `blockUUID` | string | update, delete | UUID of the target block |
+| `parentBlockUUID` | string | insert | UUID of the parent block to insert under |
+| `content` | string | insert, update | Block content in Logseq markdown format |
+| `siblingOrder` | number | (optional) | Position among siblings (0 = first child) |
+
+### Safety
+
+- If no page is open, edit mode is silently disabled for that query and a warning is shown
+- Invalid commands (malformed JSON, missing required fields) are logged and skipped
+- Each command execution is wrapped in try/catch — a failed command doesn't prevent subsequent commands from running
+
 ## Limitations
 
 - **Full chunk injection**: Retrieved chunks are injected in full, which can consume significant prompt tokens for long pages.
@@ -244,7 +280,7 @@ This means the plugin always works — even without embeddings configured — by
 - **No timeout on LLM call**: The `queryLiteLLM()` fetch has no built-in timeout, but the user can cancel it via the stop button in the chat UI.
 - **No streaming**: Responses are awaited in full before displaying. Long responses may take several seconds to appear.
 - **Model-specific output limits**: Each model has a hardcoded max output token limit (e.g., 16,384 for GPT-4o). Responses that exceed this limit are truncated by the API.
-- **Brute-force search**: The SQLite backend scans all document embeddings for every query. This is fast for typical graph sizes but scales linearly with document count.
+- **Brute-force fallback**: When the HNSW index is unavailable (WASM load failure, during rebuild), the SQLite backend falls back to scanning all document embeddings. This is fast for typical graph sizes but scales linearly with document count. The HNSW index provides sub-5ms queries at 20k+ chunks.
 
 ## File Reference
 
@@ -252,7 +288,9 @@ This means the plugin always works — even without embeddings configured — by
 |-------------------------|---------------------------------------------------------|
 | `src/manager.ts`        | `handleQuery()` — orchestrates the full retrieval pipeline |
 | `src/embedManager.ts`   | `useGenerateEmbedding()` — embeds the query text (provider-aware: OpenAI or Ollama) |
-| `src/storage/SQLiteVectorStore.ts` | `searchByVector()` — brute-force cosine similarity search (default backend) |
+| `src/storage/SQLiteVectorStore.ts` | `searchByVector()` — brute-force cosine similarity search (fallback); `getAllEmbeddings()` — bulk read for HNSW index construction |
+| `src/storage/VectorSearchAccelerator.ts` | `VectorSearchAccelerator` — in-memory HNSW index for fast approximate nearest neighbor search with automatic brute-force fallback |
+| `src/storage/VectorSearchAccelerator.types.ts` | Configuration and type definitions for the HNSW accelerator |
 | `src/storage/cosineSimilarity.ts` | `cosineSimilarity()` — cosine similarity computation     |
 | `src/bm25Index.ts`      | `BM25Index` — in-memory inverted index for BM25 keyword search |
 | `src/queryClassifier.ts`| `classifyQuery()` — heuristic query classification (keyword/semantic/mixed) |
@@ -260,6 +298,11 @@ This means the plugin always works — even without embeddings configured — by
 | `src/reranker.ts`       | `rerankWithRRF()` — single-list RRF reranking (legacy Orama path); `mergeWithRRF()` — dual-list RRF fusion (hybrid search) |
 | `src/VectorDBManager.ts`| `vectorSearchOramaDB()` — legacy Orama vector search (settings backend only) |
 | `src/LLMManager.ts`     | `queryLiteLLM()` — sends system + user messages to LLM via LiteLLM; `ChatMessage` type for message role typing; `MODEL_MAX_TOKENS` — per-model output token limits; `getMaxTokensForModel()` — lookup function |
+| `src/editPromptBuilder.ts` | `buildEditSystemPrompt()` — edit-mode system prompt with json-edit schema; `buildPageContextMessage()` — formats page block tree for LLM |
+| `src/editCommandParser.ts` | `parseEditCommands()` — extracts and validates edit commands from LLM response json-edit blocks |
+| `src/blockExecutor.ts`  | `executeAll()` / `executeOne()` — executes edit commands via Logseq Editor API (insertBlock, updateBlock, removeBlock) |
+| `src/blockTreeFormatter.ts` | `getActivePageContext()` — fetches and formats the current page's block tree with UUIDs for edit mode |
+| `src/types/editTypes.ts` | TypeScript types for EditCommand, EditAction, ParseResult, ExecutionResult, OperationOutcome |
 | `src/blockRefParser.ts` | `parse()`, `serialize()`, `transformToMarkdownLinks()` — detects and transforms `((uuid))` block references in LLM responses |
 | `src/components/BlockLink.tsx` | `BlockLink` — clickable inline component for block references (teal, navigates to block via `scrollToBlockInPage`) |
 | `src/components/ChatMessageList.tsx` | Chat message rendering with page link and block reference transformation pipeline |

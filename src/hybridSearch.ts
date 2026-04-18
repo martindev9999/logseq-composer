@@ -3,11 +3,13 @@ import { classifyQuery } from './queryClassifier';
 import type { RankedHit, SearchHit } from './reranker';
 import { mergeWithRRF } from './reranker';
 import type { PerDocumentStorageProvider } from './storage/StorageProvider';
+import type { VectorSearchAccelerator } from './storage/VectorSearchAccelerator';
 
 export interface HybridSearchOptions {
   limit?: number;       // max results, default 5
   threshold?: number;   // vector similarity threshold, default 0.5
   rrfK?: number;        // RRF constant, default 60
+  accelerator?: VectorSearchAccelerator;  // optional HNSW accelerator for fast vector search
 }
 
 const DEFAULT_LIMIT = 5;
@@ -38,7 +40,10 @@ export async function hybridSearch(
 
   // 2. Execute BM25 and vector search in parallel
   const bm25Promise = Promise.resolve().then(() => bm25Index.search(query, limit));
-  const vectorPromise = storageProvider.searchByVector(queryEmbedding, limit, threshold);
+  const accelerator = options?.accelerator;
+  const vectorPromise = accelerator?.isReady
+    ? accelerator.searchByVector(queryEmbedding, limit, threshold)
+    : storageProvider.searchByVector(queryEmbedding, limit, threshold);
 
   const [bm25Result, vectorResult] = await Promise.allSettled([bm25Promise, vectorPromise]);
 

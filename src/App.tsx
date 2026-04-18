@@ -2,15 +2,23 @@ import { AppUserConfigs } from '@logseq/libs/dist/LSPlugin';
 import ChatMessageList, { ChatMessage } from 'components/ChatMessageList';
 import { useThemeMode } from 'hooks/useThemeMode';
 import type { IndexingResult } from 'indexManager';
-import { getIndexingProgress, isIndexingActive, requestPauseIndexing } from 'indexManager';
+import { cancelAutoIndexDebounce, getIndexingProgress, isIndexingActive, requestPauseIndexing, setAutoEmbedEnabled as setAutoEmbedEnabledIM, setAutoIndexDebounceSeconds } from 'indexManager';
 import { clearConversationHistory, enableAutoIndexer, handleQuery, indexEntireLogSeq } from 'manager';
 import React, { KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { useRecoilValue } from 'recoil';
+import { useRecoilState, useRecoilValue } from 'recoil';
+import { executeAll } from './blockExecutor';
+import { getActivePageContext } from './blockTreeFormatter';
+import { getButtonState } from './buttonState';
+import { AutoEmbedToggle } from './components/AutoEmbedToggle';
+import { ChangeSummary } from './components/ChangeSummary';
+import { EditToggle } from './components/EditToggle';
+import { cancelCooldown, startCooldown } from './cooldownManager';
 import { useAppVisible } from './hooks/useAppVisible';
 import { useCtrlKey } from './hooks/useCtrlKey';
-import { settingsState } from './state/settings';
+import { aiEditModeState, settingsState } from './state/settings';
 import { darkTheme, keyframes, styled } from './stitches.config';
 import type { StorageProvider } from './storage/StorageProvider';
+import type { ExecutionResult } from './types/editTypes';
 
 // --- Animations ---
 
@@ -345,29 +353,45 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
   const themeMode = useThemeMode(initialThemeMode);
   const ctrlHeld = useCtrlKey();
   const settings = useRecoilValue(settingsState);
+  const [aiEditMode, setAiEditMode] = useRecoilState(aiEditModeState);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(isIndexingActive());
+  const [editResults, setEditResults] = useState<Map<string | number, ExecutionResult>>(new Map());
 
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [savedDraft, setSavedDraft] = useState('');
   const abortControllerRef = useRef<AbortController | null>(null);
   const [docCount, setDocCount] = useState<number | null>(null);
+  const [pageCount, setPageCount] = useState<number | null>(null);
   const [indexingStatus, setIndexingStatus] = useState<IndexingResult | null>(null);
   const [isDismissing, setIsDismissing] = useState(false);
   const [progressCount, setProgressCount] = useState(getIndexingProgress);
+  const [autoEmbedEnabled, setAutoEmbedEnabled] = useState(() => (logseq.settings?.autoEmbedEnabled as boolean) ?? true);
+  const [cooldownActive, setCooldownActive] = useState(false);
 
-  // Poll document count every 10 seconds
+  // Cancel cooldown timer on unmount
+  useEffect(() => {
+    return () => { cancelCooldown(); };
+  }, []);
+
+  // Poll document and page count every 10 seconds
   useEffect(() => {
     const fetchCount = async () => {
       if (storageProvider.getDocumentCount) {
         try {
           const count = await storageProvider.getDocumentCount();
           setDocCount(count);
+        } catch { /* ignore */ }
+      }
+      if (storageProvider.getPageCount) {
+        try {
+          const count = await storageProvider.getPageCount();
+          setPageCount(count);
         } catch { /* ignore */ }
       }
     };
@@ -377,7 +401,14 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
   }, [storageProvider]);
 
   useEffect(() => {
-    if (settings) enableAutoIndexer(settings, storageProvider);
+    if (settings) {
+      enableAutoIndexer(settings, storageProvider);
+      // Sync configurable debounce delay from settings
+      const debounce = settings.autoIndexDebounceSeconds;
+      if (typeof debounce === 'number' && debounce > 0) {
+        setAutoIndexDebounceSeconds(debounce);
+      }
+    }
   }, [settings]);
 
   // Auto-dismiss success status after 4 seconds
@@ -391,14 +422,36 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
     return () => clearTimeout(timer);
   }, [indexingStatus]);
 
-  // Poll indexing progress every 500ms while indexing is active
+  // Poll indexing progress every 500ms while indexing is active.
+  // Also detects when auto-indexer finishes (isIndexingActive becomes false).
   useEffect(() => {
     if (!isIndexing) return;
     const interval = setInterval(() => {
       setProgressCount(getIndexingProgress());
+      // Detect auto-indexer completion
+      if (!manualIndexingRef.current && !isIndexingActive()) {
+        setIsIndexing(false);
+      }
     }, 500);
     return () => clearInterval(interval);
   }, [isIndexing]);
+
+  // Detect auto-indexer activity: poll isIndexingActive() to sync the
+  // React isIndexing state with the module-level indexingInProgress flag.
+  // Polls every 1s when the panel is visible and not during manual indexing.
+  const manualIndexingRef = useRef(false);
+  useEffect(() => {
+    if (!isVisible) return;
+    const interval = setInterval(() => {
+      if (manualIndexingRef.current) return;
+      const active = isIndexingActive();
+      setIsIndexing(prev => {
+        if (active && !prev) return true;
+        return prev;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isVisible]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -432,13 +485,44 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
     try {
       const controller = new AbortController();
       abortControllerRef.current = controller;
-      const resp = await handleQuery(inputMessage.trim(), settings, storageProvider, controller.signal);
+
+      // When edit mode is on, check for an active page first
+      let effectiveEditMode = aiEditMode || undefined;
+      if (aiEditMode) {
+        const pageCtx = await getActivePageContext();
+        if (!pageCtx) {
+          effectiveEditMode = undefined;
+          setMessages(prev => [...prev, {
+            id: Date.now() + '_warning',
+            content: '⚠️ No active page is open. Edit mode requires an open page to work. Sending query without edit context.',
+            sender: 'assistant',
+          }]);
+        }
+      }
+
+      const resp = await handleQuery(inputMessage.trim(), settings, storageProvider, controller.signal, effectiveEditMode);
       abortControllerRef.current = null;
-      setMessages(prev => [...prev, {
-        id: Date.now() + '_assistant',
-        content: resp,
-        sender: 'assistant',
-      }]);
+
+      if (aiEditMode && typeof resp === 'object' && resp !== null && 'text' in resp) {
+        const editResp = resp;
+        const assistantMsgId = Date.now() + '_assistant';
+        setMessages(prev => [...prev, {
+          id: assistantMsgId,
+          content: editResp.text,
+          sender: 'assistant',
+        }]);
+
+        if (editResp.commands.length > 0) {
+          const result = await executeAll(editResp.commands);
+          setEditResults(prev => new Map(prev).set(assistantMsgId, result));
+        }
+      } else {
+        setMessages(prev => [...prev, {
+          id: Date.now() + '_assistant',
+          content: typeof resp === 'string' ? resp : resp.text,
+          sender: 'assistant',
+        }]);
+      }
     } catch (err: any) {
       abortControllerRef.current = null;
       if (err.name === 'AbortError') {
@@ -499,7 +583,15 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
   };
 
   const handleIndexDB = async () => {
-    if (isIndexing) { requestPauseIndexing(); return; }
+    if (isIndexing) {
+      requestPauseIndexing();
+      cancelAutoIndexDebounce();
+      startCooldown(() => setCooldownActive(false));
+      setCooldownActive(true);
+      return;
+    }
+    if (cooldownActive) return;
+    manualIndexingRef.current = true;
     setIsIndexing(true);
     setError(null);
     setIndexingStatus(null);
@@ -516,6 +608,7 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
       setError(err.message || 'Indexing failed.');
     } finally {
       setIsIndexing(false);
+      manualIndexingRef.current = false;
     }
   };
 
@@ -523,10 +616,27 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
     setMessages([]);
     setInputMessage('');
     setError(null);
+    setAiEditMode(false);
+    setEditResults(new Map());
     clearConversationHistory();
   };
 
+  const handleAutoEmbedToggle = () => {
+    const newValue = !autoEmbedEnabled;
+    setAutoEmbedEnabled(newValue);
+    setAutoEmbedEnabledIM(newValue);
+    logseq.updateSettings({ autoEmbedEnabled: newValue });
+    // When disabling auto-embed, also stop any in-progress auto-indexing
+    // and cancel pending debounce timers so the user gets immediate feedback
+    if (!newValue && isIndexing && !manualIndexingRef.current) {
+      requestPauseIndexing();
+      cancelAutoIndexDebounce();
+    }
+  };
+
   if (!isVisible) return null;
+
+  const buttonProps = getButtonState({ isIndexing, isCooldownActive: cooldownActive });
 
   return (
     <Overlay onClick={e => {
@@ -552,6 +662,17 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
               return provider.getBlockMetadata?.(uuid) ?? null;
             }}
           />
+          {messages.map((msg) => {
+            const result = editResults.get(msg.id);
+            return result ? (
+              <div key={`summary-${msg.id}`} style={{ display: 'flex', gap: '8px', justifyContent: 'flex-start', marginTop: '12px' }}>
+                <div style={{ width: '28px', flexShrink: 0 }} />
+                <div style={{ maxWidth: '80%' }}>
+                  <ChangeSummary result={result} />
+                </div>
+              </div>
+            ) : null;
+          })}
           {loading && (
             <TypingIndicator>
               <Dot delay={0} /><Dot delay={1} /><Dot delay={2} />
@@ -596,7 +717,7 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
               </StatusIndicator>
             ) : indexingStatus?.outcome === 'completed' ? (
               <StatusIndicator variant="success" dismissing={isDismissing || undefined}>
-                ✓ Indexing complete — {docCount?.toLocaleString()} chunks indexed
+                ✓ Indexing complete — {docCount?.toLocaleString()} chunks indexed{pageCount ? ` from ${pageCount.toLocaleString()} pages` : ''}
               </StatusIndicator>
             ) : indexingStatus?.outcome === 'paused' ? (
               <StatusIndicator variant="paused">
@@ -604,15 +725,22 @@ export function App({ themeMode: initialThemeMode, storageProvider }: Props) {
               </StatusIndicator>
             ) : (
               <StatusText>
-                {docCount !== null && <>📊 {docCount.toLocaleString()} chunks indexed</>}
+                {docCount !== null && <>📊 {docCount.toLocaleString()} chunks indexed{pageCount ? ` from ${pageCount.toLocaleString()} pages` : ''}</>}
               </StatusText>
             )}
-            <div style={{ display: 'flex', gap: '6px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <AutoEmbedToggle enabled={autoEmbedEnabled} onToggle={handleAutoEmbedToggle} />
+              <EditToggle enabled={aiEditMode} onToggle={() => setAiEditMode(prev => !prev)} />
               {storageProvider.exportToFile && (
                 <ToolbarButton onClick={() => storageProvider.exportToFile?.()}>📥 Export</ToolbarButton>
               )}
-              <ToolbarButton variant={isIndexing ? 'pause' : 'index'} onClick={handleIndexDB}>
-                {isIndexing ? '⏹ Stop' : '🔄 Re-Index'}
+              <ToolbarButton
+                variant={buttonProps.variant}
+                onClick={handleIndexDB}
+                disabled={buttonProps.disabled}
+                css={buttonProps.disabled ? { opacity: 0.5, cursor: 'default' } : undefined}
+              >
+                {buttonProps.label}
               </ToolbarButton>
             </div>
           </ToolbarRow>

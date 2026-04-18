@@ -136,4 +136,75 @@ describe('hybridSearch', () => {
     );
     expect(results).toEqual(mergedResults);
   });
+
+  describe('VectorSearchAccelerator integration', () => {
+    const acceleratorResults: SearchResult[] = [
+      { id: 'a1', content: 'accelerator result 1', score: 0.95 },
+      { id: 'a2', content: 'accelerator result 2', score: 0.85 },
+    ];
+
+    function makeAccelerator(ready: boolean, results?: SearchResult[] | Error) {
+      return {
+        get isReady() { return ready; },
+        searchByVector: results instanceof Error
+          ? vi.fn().mockRejectedValue(results)
+          : vi.fn().mockResolvedValue(results ?? []),
+      } as any;
+    }
+
+    it('uses accelerator for vector search when provided and ready', async () => {
+      const storageProvider = makeStorageProvider(vectorResults);
+      const bm25Index = makeBm25Index(bm25Results);
+      const accelerator = makeAccelerator(true, acceleratorResults);
+
+      const results = await hybridSearch(query, queryEmbedding, storageProvider, bm25Index, { accelerator });
+
+      expect(accelerator.searchByVector).toHaveBeenCalledWith(queryEmbedding, 5, 0.5);
+      expect(storageProvider.searchByVector).not.toHaveBeenCalled();
+      expect(mockedMergeWithRRF).toHaveBeenCalledWith(
+        bm25Results.map((r) => ({ id: r.id, content: r.content, score: r.score })),
+        acceleratorResults.map((r) => ({ id: r.id, content: r.content, score: r.score })),
+        expect.objectContaining({ k: 60, limit: 5 }),
+      );
+      expect(results).toEqual(mergedResults);
+    });
+
+    it('falls back to storageProvider when accelerator is not ready', async () => {
+      const storageProvider = makeStorageProvider(vectorResults);
+      const bm25Index = makeBm25Index(bm25Results);
+      const accelerator = makeAccelerator(false);
+
+      await hybridSearch(query, queryEmbedding, storageProvider, bm25Index, { accelerator });
+
+      expect(accelerator.searchByVector).not.toHaveBeenCalled();
+      expect(storageProvider.searchByVector).toHaveBeenCalledWith(queryEmbedding, 5, 0.5);
+    });
+
+    it('falls back to storageProvider when no accelerator is provided', async () => {
+      const storageProvider = makeStorageProvider(vectorResults);
+      const bm25Index = makeBm25Index(bm25Results);
+
+      await hybridSearch(query, queryEmbedding, storageProvider, bm25Index, {});
+
+      expect(storageProvider.searchByVector).toHaveBeenCalledWith(queryEmbedding, 5, 0.5);
+    });
+
+    it('handles accelerator search failure via allSettled', async () => {
+      const storageProvider = makeStorageProvider(vectorResults);
+      const bm25Index = makeBm25Index(bm25Results);
+      const accelerator = makeAccelerator(true, new Error('HNSW failure'));
+
+      const results = await hybridSearch(query, queryEmbedding, storageProvider, bm25Index, { accelerator });
+
+      expect(accelerator.searchByVector).toHaveBeenCalled();
+      expect(storageProvider.searchByVector).not.toHaveBeenCalled();
+      // Vector search failed, only BM25 hits passed to RRF
+      expect(mockedMergeWithRRF).toHaveBeenCalledWith(
+        bm25Results.map((r) => ({ id: r.id, content: r.content, score: r.score })),
+        [],
+        expect.objectContaining({ bm25Weight: 1, vectorWeight: 1 }),
+      );
+      expect(results).toEqual(mergedResults);
+    });
+  });
 });

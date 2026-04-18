@@ -1,4 +1,7 @@
+import { getActivePageContext } from 'blockTreeFormatter';
 import { BM25Index } from 'bm25Index';
+import { parseEditCommands } from 'editCommandParser';
+import { buildEditSystemPrompt, buildPageContextMessage } from 'editPromptBuilder';
 import { clearRefCache, useGenerateEmbedding } from 'embedManager';
 import { hybridSearch } from 'hybridSearch';
 import { checkAndIndexUpdatedPages, startPageIndexingOnChange, type IndexingResult } from 'indexManager';
@@ -7,6 +10,8 @@ import { rerankWithRRF, type SearchHit } from 'reranker';
 import { getOrLoadVectorDatabase, loadVectorDatabase, vectorSearchOramaDB } from 'VectorDBManager';
 import { SQLiteVectorStore } from './storage/SQLiteVectorStore';
 import type { PerDocumentStorageProvider, StorageProvider } from './storage/StorageProvider';
+import type { VectorSearchAccelerator } from './storage/VectorSearchAccelerator';
+import type { EditCommand } from './types/editTypes';
 
 const CURRENT_CHUNKING_VERSION = '2'; // token-based
 
@@ -14,6 +19,11 @@ const CURRENT_CHUNKING_VERSION = '2'; // token-based
 const conversationHistory: Array<{ role: 'user' | 'assistant', content: string }> = [];
 // Set maximum number of history messages to include in the prompt (e.g., last 6 messages)
 const MAX_HISTORY_LENGTH = 6;
+
+export interface EditQueryResult {
+  text: string;           // LLM response with json-edit blocks stripped
+  commands: EditCommand[]; // parsed edit commands (may be empty)
+}
 
 /** Clear the conversation history for a fresh session. */
 export function clearConversationHistory(): void {
@@ -40,6 +50,19 @@ export function getBM25Index(): BM25Index | null {
 /** Reset the BM25 index (used when the store is cleared). */
 export function resetBM25Index(): void {
   bm25Index = null;
+}
+
+/** Module-level accelerator reference, set from outside via setAccelerator(). */
+let accelerator: VectorSearchAccelerator | null = null;
+
+/** Set the VectorSearchAccelerator instance for use by handleQuery and indexEntireLogSeq. */
+export function setAccelerator(acc: VectorSearchAccelerator | null): void {
+  accelerator = acc;
+}
+
+/** Return the current VectorSearchAccelerator instance (may be null). */
+export function getAccelerator(): VectorSearchAccelerator | null {
+  return accelerator;
 }
 
 /**
@@ -80,10 +103,15 @@ export async function indexEntireLogSeq(settings: any, storageProvider: StorageP
       console.info('[indexEntireLogSeq] Full mode: clearing documents table before re-index.');
       await storageProvider.clear();
       resetBM25Index();
+      accelerator?.dispose();
     }
-    const result = await checkAndIndexUpdatedPages(settings.apiKey, undefined, settings.EmbeddingApiKey, settings.embeddingModel, storageProvider, settings.embeddingEndpoint, settings.embeddingProvider);
+    const result = await checkAndIndexUpdatedPages(settings.apiKey, undefined, settings.EmbeddingApiKey, settings.embeddingModel, storageProvider, settings.embeddingEndpoint, settings.embeddingProvider, accelerator ?? undefined);
     // Invalidate BM25 index so it rebuilds lazily from the updated store on next query
     resetBM25Index();
+    // Re-initialize accelerator after full re-index (it was disposed above)
+    if (settings.indexingMode === 'full' && accelerator) {
+      await accelerator.initialize();
+    }
     return result;
   } else {
     // Legacy Orama-based path: forceNew=true when full mode
@@ -97,7 +125,7 @@ export async function indexEntireLogSeq(settings: any, storageProvider: StorageP
 export async function enableAutoIndexer(settings: any, storageProvider: StorageProvider) {
   if (hasSearchByVector(storageProvider)) {
     // Per-document path: no Orama instance needed
-    startPageIndexingOnChange(settings.apiKey, undefined, settings.EmbeddingApiKey, settings.embeddingModel, storageProvider, settings.embeddingEndpoint, settings.embeddingProvider);
+    startPageIndexingOnChange(settings.apiKey, undefined, settings.EmbeddingApiKey, settings.embeddingModel, storageProvider, settings.embeddingEndpoint, settings.embeddingProvider, accelerator ?? undefined);
   } else {
     // Legacy Orama-based path
     const oramaDatabaseInstance = await loadVectorDatabase(settings, false, settings.embeddingModel, storageProvider);
@@ -105,7 +133,7 @@ export async function enableAutoIndexer(settings: any, storageProvider: StorageP
   }
 }
 
-export async function handleQuery(query: string, settings: any, storageProvider: StorageProvider, signal?: AbortSignal): Promise<string> {
+export async function handleQuery(query: string, settings: any, storageProvider: StorageProvider, signal?: AbortSignal, editMode?: boolean): Promise<string | EditQueryResult> {
   // Add the new user query to the conversation history
   conversationHistory.push({ role: "user", content: query });
 
@@ -121,7 +149,7 @@ export async function handleQuery(query: string, settings: any, storageProvider:
     if (hasSearchByVector(storageProvider)) {
       // Per-document path: hybrid search (BM25 + vector, merged via RRF)
       const index = ensureBM25Index(storageProvider);
-      const reranked = await hybridSearch(query, queryEmbedding, storageProvider, index);
+      const reranked = await hybridSearch(query, queryEmbedding, storageProvider, index, { accelerator: accelerator ?? undefined });
       console.info(`[handleQuery] Hybrid search returned ${reranked.length} results`);
       reranked.forEach(hit => {
         vectorContext += hit.content + "\n\n";
@@ -157,7 +185,18 @@ export async function handleQuery(query: string, settings: any, storageProvider:
   }
 
   // Build the system message from the settings prompt.
-  const systemMessage = settings.prompt;
+  let systemMessage = settings.prompt;
+
+  // When edit mode is enabled, fetch page context and augment prompts.
+  let editPageContext: Awaited<ReturnType<typeof getActivePageContext>> = null;
+  if (editMode) {
+    try {
+      editPageContext = await getActivePageContext();
+    } catch (err) {
+      console.error('[handleQuery] Failed to get active page context for edit mode:', err);
+    }
+    systemMessage += '\n\n' + buildEditSystemPrompt();
+  }
 
   // Build the user message with context and conversation history.
   let userMessage = "";
@@ -198,6 +237,11 @@ export async function handleQuery(query: string, settings: any, storageProvider:
     userMessage += vectorContext;
   }
 
+  // When edit mode is enabled and page context is available, append block tree context.
+  if (editMode && editPageContext) {
+    userMessage += '\n' + buildPageContextMessage(editPageContext.pageName, editPageContext.formattedTree) + '\n';
+  }
+
   // Build the messages array with proper roles.
   const messages: ChatMessage[] = [
     { role: 'system', content: systemMessage },
@@ -221,6 +265,15 @@ export async function handleQuery(query: string, settings: any, storageProvider:
   // Trim conversation history if it grows too large.
   if (conversationHistory.length > MAX_HISTORY_LENGTH * 2) {
     conversationHistory.splice(0, conversationHistory.length - MAX_HISTORY_LENGTH * 2);
+  }
+
+  // When edit mode is enabled, parse edit commands from the response.
+  if (editMode) {
+    const parseResult = parseEditCommands(assistantResponse);
+    return {
+      text: parseResult.textWithoutEditBlocks,
+      commands: parseResult.commands,
+    };
   }
 
   return assistantResponse;

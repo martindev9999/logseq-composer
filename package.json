@@ -28,6 +28,7 @@
     "@radix-ui/react-toolbar": "^0.1.4",
     "@stitches/react": "^1.2.6",
     "apache-arrow": "18.1.0",
+    "hnswlib-wasm": "^0.8.2",
     "js-tiktoken": "^1.0.21",
     "react": "^17.0.2",
     "react-dom": "^17.0.2",

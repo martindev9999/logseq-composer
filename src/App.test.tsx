@@ -28,6 +28,7 @@ vi.mock('./indexManager', () => ({
   isIndexingActive: vi.fn(() => false),
   requestPauseIndexing: vi.fn(),
   getIndexingProgress: vi.fn(() => 0),
+  cancelAutoIndexDebounce: vi.fn(),
 }));
 
 // Mock manager
@@ -49,6 +50,16 @@ vi.mock('./hooks/useThemeMode', () => ({
 }));
 
 // Mock recoil
+// Configurable aiEditMode for tests
+let mockAiEditMode = false;
+const mockSetAiEditMode = vi.fn((updater: any) => {
+  if (typeof updater === 'function') {
+    mockAiEditMode = updater(mockAiEditMode);
+  } else {
+    mockAiEditMode = updater;
+  }
+});
+
 vi.mock('recoil', () => ({
   useRecoilValue: vi.fn(() => ({
     selectedModel: 'test',
@@ -59,6 +70,7 @@ vi.mock('recoil', () => ({
     embeddingModel: '',
     VectorDBLogseqCopilot: '',
   })),
+  useRecoilState: vi.fn(() => [mockAiEditMode, mockSetAiEditMode]),
   atom: vi.fn(() => ({})),
   RecoilRoot: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
@@ -87,9 +99,53 @@ vi.mock('./components/ChatMessageList', () => ({
   default: () => React.createElement('div', { 'data-testid': 'chat-messages' }),
 }));
 
+// Mock EditToggle
+vi.mock('./components/EditToggle', () => ({
+  EditToggle: (props: any) => React.createElement('button', {
+    'data-testid': 'edit-toggle',
+    role: 'switch',
+    'aria-checked': props.enabled,
+    onClick: props.onToggle,
+  }, 'AI Edit'),
+}));
+
+// Mock ChangeSummary
+vi.mock('./components/ChangeSummary', () => ({
+  ChangeSummary: (props: any) => React.createElement('div', {
+    'data-testid': 'change-summary',
+  }, `Changes: ${props.result.successCount} succeeded, ${props.result.failedCount} failed`),
+}));
+
+// Mock blockExecutor
+vi.mock('./blockExecutor', () => ({
+  executeAll: vi.fn(),
+  executeOne: vi.fn(),
+}));
+
+// Mock blockTreeFormatter
+vi.mock('./blockTreeFormatter', () => ({
+  getActivePageContext: vi.fn(() => Promise.resolve(null)),
+}));
+
+// Mock cooldownManager
+vi.mock('./cooldownManager', () => ({
+  cancelCooldown: vi.fn(),
+  startCooldown: vi.fn(),
+}));
+
+// Mock buttonState
+vi.mock('./buttonState', () => ({
+  getButtonState: vi.fn((input: any) => {
+    if (input.isIndexing) return { label: '⏹ Stop', variant: 'pause', disabled: false };
+    if (input.isCooldownActive) return { label: '🔄 Re-Index', variant: 'index', disabled: true };
+    return { label: '🔄 Re-Index', variant: 'index', disabled: false };
+  }),
+}));
+
 // Mock state/settings
 vi.mock('./state/settings', () => ({
   settingsState: {},
+  aiEditModeState: {},
 }));
 
 // Setup logseq global
@@ -108,12 +164,17 @@ if (typeof window !== 'undefined') {
 
 // Now import the modules
 import { App } from './App';
+import { executeAll } from './blockExecutor';
+import { getActivePageContext } from './blockTreeFormatter';
 import { isIndexingActive, requestPauseIndexing } from './indexManager';
-import { indexEntireLogSeq } from './manager';
+import { handleQuery, indexEntireLogSeq } from './manager';
 
 const mockIsIndexingActive = isIndexingActive as ReturnType<typeof vi.fn>;
 const mockRequestPauseIndexing = requestPauseIndexing as ReturnType<typeof vi.fn>;
+const mockHandleQuery = handleQuery as ReturnType<typeof vi.fn>;
+const mockExecuteAll = executeAll as ReturnType<typeof vi.fn>;
 const mockIndexEntireLogSeq = indexEntireLogSeq as ReturnType<typeof vi.fn>;
+const mockGetActivePageContext = getActivePageContext as ReturnType<typeof vi.fn>;
 
 const mockStorageProvider = {
   clear: vi.fn(() => Promise.resolve()),
@@ -123,6 +184,7 @@ const mockStorageProvider = {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mockAiEditMode = false;
 });
 
 describe('Bug Condition Exploration: Re-Index button state on mount', () => {
@@ -748,5 +810,252 @@ describe('StatusIndicator unit tests', () => {
     expect(container.textContent).toContain('Storage failure');
     // The ⚠️ icon is part of ErrorBanner
     expect(container.textContent).toContain('⚠️');
+  });
+});
+
+
+describe('Edit mode handleSubmit flow', () => {
+  /**
+   * Test: When aiEditMode is true, handleQuery is called with editMode: true
+   * and the EditQueryResult text is rendered as an assistant message.
+   *
+   * **Validates: Requirements 4.1, 4.2**
+   */
+  it('calls handleQuery with editMode true and renders text response when aiEditMode is on', async () => {
+    mockAiEditMode = true;
+    mockIsIndexingActive.mockReturnValue(false);
+    mockGetActivePageContext.mockResolvedValue({
+      pageName: 'Test Page',
+      pageUUID: 'page-uuid-123',
+      formattedTree: '[uuid:abc] - Block content',
+      blockCount: 1,
+    });
+    mockHandleQuery.mockResolvedValue({
+      text: 'I updated the heading for you.',
+      commands: [],
+    });
+
+    const { container } = render(
+      <App themeMode="light" storageProvider={mockStorageProvider as any} />
+    );
+
+    // Type a message and submit
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Update the heading' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+
+    await flushPromises();
+
+    // handleQuery should have been called with editMode = true
+    expect(mockHandleQuery).toHaveBeenCalledWith(
+      'Update the heading',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      true
+    );
+
+    // No ChangeSummary should be rendered (no commands)
+    expect(container.querySelector('[data-testid="change-summary"]')).toBeNull();
+  });
+
+  /**
+   * Test: When aiEditMode is true and commands are returned, executeAll is called
+   * and ChangeSummary is rendered.
+   *
+   * **Validates: Requirements 4.1, 5.1**
+   */
+  it('executes commands via executeAll and renders ChangeSummary in autopilot mode', async () => {
+    mockAiEditMode = true;
+    mockIsIndexingActive.mockReturnValue(false);
+    mockGetActivePageContext.mockResolvedValue({
+      pageName: 'Test Page',
+      pageUUID: 'page-uuid-123',
+      formattedTree: '[uuid:abc] - Block content',
+      blockCount: 1,
+    });
+    mockHandleQuery.mockResolvedValue({
+      text: 'Here are the changes.',
+      commands: [
+        { action: 'update', blockUUID: 'abc-123', content: 'Updated content' },
+      ],
+    });
+    mockExecuteAll.mockResolvedValue({
+      successCount: 1,
+      failedCount: 0,
+      deniedCount: 0,
+      outcomes: [
+        { command: { action: 'update', blockUUID: 'abc-123', content: 'Updated content' }, status: 'success' },
+      ],
+    });
+
+    const { container } = render(
+      <App themeMode="light" storageProvider={mockStorageProvider as any} />
+    );
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Update the heading' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+
+    await flushPromises();
+
+    // executeAll should have been called with the commands
+    expect(mockExecuteAll).toHaveBeenCalledWith([
+      { action: 'update', blockUUID: 'abc-123', content: 'Updated content' },
+    ]);
+
+    // ChangeSummary should be rendered
+    const summary = container.querySelector('[data-testid="change-summary"]');
+    expect(summary).not.toBeNull();
+    expect(summary!.textContent).toContain('1 succeeded');
+  });
+
+  /**
+   * Test: When aiEditMode is false, handleQuery is called without editMode
+   * and the string response is rendered normally.
+   *
+   * **Validates: Requirements 4.2 (inverse)**
+   */
+  it('calls handleQuery without editMode when aiEditMode is off', async () => {
+    mockAiEditMode = false;
+    mockIsIndexingActive.mockReturnValue(false);
+    mockHandleQuery.mockResolvedValue('Here is your answer.');
+
+    const { container } = render(
+      <App themeMode="light" storageProvider={mockStorageProvider as any} />
+    );
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'What is this page about?' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+
+    await flushPromises();
+
+    // handleQuery should have been called without editMode (undefined)
+    expect(mockHandleQuery).toHaveBeenCalledWith(
+      'What is this page about?',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      undefined
+    );
+
+    // No ChangeSummary should be rendered
+    expect(container.querySelector('[data-testid="change-summary"]')).toBeNull();
+  });
+
+  /**
+   * Test: When aiEditMode is true but no commands are returned,
+   * executeAll is NOT called and no ChangeSummary is shown.
+   *
+   * **Validates: Requirements 4.1**
+   */
+  it('does not call executeAll when edit response has no commands', async () => {
+    mockAiEditMode = true;
+    mockIsIndexingActive.mockReturnValue(false);
+    mockGetActivePageContext.mockResolvedValue({
+      pageName: 'Test Page',
+      pageUUID: 'page-uuid-123',
+      formattedTree: '[uuid:abc] - Block content',
+      blockCount: 1,
+    });
+    mockHandleQuery.mockResolvedValue({
+      text: 'No changes needed.',
+      commands: [],
+    });
+
+    const { container } = render(
+      <App themeMode="light" storageProvider={mockStorageProvider as any} />
+    );
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Check the page' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+
+    await flushPromises();
+
+    expect(mockExecuteAll).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="change-summary"]')).toBeNull();
+  });
+});
+
+describe('No active page warning in edit mode', () => {
+  /**
+   * Test: When aiEditMode is true but no active page is open,
+   * handleQuery is called without editMode (warning path taken).
+   *
+   * **Validates: Requirement 8.3**
+   */
+  it('shows warning and skips edit mode when no active page is open', async () => {
+    mockAiEditMode = true;
+    mockIsIndexingActive.mockReturnValue(false);
+    mockGetActivePageContext.mockResolvedValue(null);
+    mockHandleQuery.mockResolvedValue('Normal response without edit context.');
+
+    const { container } = render(
+      <App themeMode="light" storageProvider={mockStorageProvider as any} />
+    );
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Add a new block' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+
+    await flushPromises();
+
+    // getActivePageContext should have been called
+    expect(mockGetActivePageContext).toHaveBeenCalled();
+
+    // handleQuery should have been called WITHOUT editMode (undefined)
+    // because no active page was found
+    expect(mockHandleQuery).toHaveBeenCalledWith(
+      'Add a new block',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      undefined
+    );
+  });
+
+  /**
+   * Test: When aiEditMode is true and an active page IS open,
+   * handleQuery is called with editMode: true (no warning).
+   *
+   * **Validates: Requirement 8.3 (inverse)**
+   */
+  it('does not show warning when active page is available', async () => {
+    mockAiEditMode = true;
+    mockIsIndexingActive.mockReturnValue(false);
+    mockGetActivePageContext.mockResolvedValue({
+      pageName: 'Test Page',
+      pageUUID: 'page-uuid-123',
+      formattedTree: '[uuid:abc] - Block content',
+      blockCount: 1,
+    });
+    mockHandleQuery.mockResolvedValue({
+      text: 'I updated the block.',
+      commands: [],
+    });
+
+    const { container } = render(
+      <App themeMode="light" storageProvider={mockStorageProvider as any} />
+    );
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Update the heading' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+
+    await flushPromises();
+
+    // handleQuery should have been called WITH editMode: true
+    expect(mockHandleQuery).toHaveBeenCalledWith(
+      'Update the heading',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      true
+    );
+
+    // No warning message should appear
+    expect(container.textContent).not.toContain('No active page is open');
   });
 });

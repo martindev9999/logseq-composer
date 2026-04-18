@@ -35,6 +35,9 @@ export class SQLiteVectorStore implements StorageProvider {
       locateFile: () => wasmUrl,
     });
 
+    // Yield to the event loop so the host app stays responsive during startup
+    await new Promise(resolve => setTimeout(resolve, 0));
+
     // Try to restore from IndexedDB; handle corruption (Req 10.3)
     try {
       const existingData = await this.idbLoad();
@@ -49,6 +52,9 @@ export class SQLiteVectorStore implements StorageProvider {
       console.warn('[SQLiteVectorStore] IndexedDB data corrupted, creating fresh database.', err);
       this._db = new SQL.Database();
     }
+
+    // Yield after heavy database parsing so the host app can process messages
+    await new Promise(resolve => setTimeout(resolve, 0));
 
     // Create tables
     this._db.run(
@@ -194,6 +200,52 @@ export class SQLiteVectorStore implements StorageProvider {
     }
   }
 
+  /** Retrieve all document IDs, content, and raw embedding BLOBs for HNSW index construction. */
+  getAllEmbeddings(): Array<{ id: string; content: string; embedding: Uint8Array }> {
+    if (!this._db) return [];
+
+    const stmt = this._db.prepare('SELECT id, content, embedding FROM documents');
+    const results: Array<{ id: string; content: string; embedding: Uint8Array }> = [];
+
+    try {
+      while (stmt.step()) {
+        const row = stmt.get();
+        results.push({
+          id: row[0] as string,
+          content: row[1] as string,
+          embedding: row[2] as Uint8Array,
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+
+    return results;
+  }
+
+  /** Fetch document content by IDs (used if content cache needs refresh). */
+  getDocumentContent(ids: string[]): Map<string, string> {
+    if (!this._db || ids.length === 0) return new Map();
+
+    const placeholders = ids.map(() => '?').join(', ');
+    const stmt = this._db.prepare(
+      `SELECT id, content FROM documents WHERE id IN (${placeholders})`
+    );
+    const result = new Map<string, string>();
+
+    try {
+      stmt.bind(ids);
+      while (stmt.step()) {
+        const row = stmt.get();
+        result.set(row[0] as string, row[1] as string);
+      }
+    } finally {
+      stmt.free();
+    }
+
+    return result;
+  }
+
   /** Retrieve all document IDs and content for BM25 index building. */
   getAllDocumentContent(): Array<{ id: string; content: string }> {
     if (!this._db) return [];
@@ -216,6 +268,17 @@ export class SQLiteVectorStore implements StorageProvider {
   async getDocumentCount(): Promise<number> {
     if (!this._db) return 0;
     const result = this._db.exec('SELECT COUNT(*) FROM documents');
+    if (result.length > 0 && result[0].values.length > 0) {
+      return result[0].values[0][0] as number;
+    }
+    return 0;
+  }
+
+  async getPageCount(): Promise<number> {
+    if (!this._db) return 0;
+    const result = this._db.exec(
+      "SELECT COUNT(DISTINCT CASE WHEN INSTR(id, '_chunk_') > 0 THEN SUBSTR(id, 1, INSTR(id, '_chunk_') - 1) ELSE id END) FROM documents"
+    );
     if (result.length > 0 && result[0].values.length > 0) {
       return result[0].values[0][0] as number;
     }

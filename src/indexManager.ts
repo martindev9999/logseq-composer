@@ -11,7 +11,9 @@ export interface IndexingResult {
 import { getByID, remove } from "@orama/orama";
 import { DEFAULT_EMBEDDING_MODEL, EmbeddingProvider, extractOutgoingLinks, fetchBacklinks, getEmbeddingsForPage, PageLinkData } from "embedManager";
 import { batchInsertEmbeddings, OramaInstance } from "VectorDBManager";
+import { shouldSuppressAutoIndex } from "./cooldownManager";
 import type { DocumentRecord, PerDocumentStorageProvider, StorageProvider } from "./storage/StorageProvider";
+import type { VectorSearchAccelerator } from "./storage/VectorSearchAccelerator";
 
 const BATCH_SIZE = 5;
 
@@ -23,6 +25,7 @@ let currentEmbeddingEndpoint = '';
 let currentEmbeddingProvider: EmbeddingProvider = 'openai';
 let currentOramaInstance: OramaInstance | undefined;
 let currentStorageProvider: StorageProvider;
+let currentAccelerator: VectorSearchAccelerator | undefined;
 let indexingInProgress = false;
 let _pauseRequested = false;
 let _pagesProcessed = 0;
@@ -47,6 +50,18 @@ export function isIndexingActive(): boolean {
  */
 export function getIndexingProgress(): number {
   return _pagesProcessed;
+}
+
+/**
+ * Reset module-level indexing state. Intended for tests only — ensures clean
+ * state between fast-check iterations when the 1-second cooldown timer may
+ * not have fired due to fake timers or test parallelism.
+ * @internal
+ */
+export function _resetIndexingState(): void {
+  indexingInProgress = false;
+  _pauseRequested = false;
+  _pagesProcessed = 0;
 }
 
 let _isUpdatingSettings = false;
@@ -101,7 +116,8 @@ export async function checkAndIndexUpdatedPages(
   model: string = DEFAULT_EMBEDDING_MODEL,
   storageProvider: StorageProvider,
   embeddingEndpoint?: string,
-  embeddingProvider?: EmbeddingProvider
+  embeddingProvider?: EmbeddingProvider,
+  accelerator?: VectorSearchAccelerator
 ): Promise<IndexingResult> {
   if (indexingInProgress) return { outcome: 'completed', pagesProcessed: 0 };
 
@@ -175,6 +191,7 @@ export async function checkAndIndexUpdatedPages(
             oldChunkIds.push(`${page.id}_chunk_${c}`);
           }
           await storageProvider.deleteDocuments(oldChunkIds);
+          accelerator?.removeVectors(oldChunkIds);
 
           // Map embeddings to DocumentRecord[] and upsert
           const docs: DocumentRecord[] = newEmbeddings.map(e => ({
@@ -184,6 +201,7 @@ export async function checkAndIndexUpdatedPages(
             embedding: e.embedding,
           }));
           await storageProvider.upsertDocuments(docs);
+          accelerator?.addVectors(docs.map(d => ({ id: d.id, content: d.content, embedding: d.embedding })));
 
           // Upsert block metadata after successful indexing
           if (blockMetadata.length > 0) {
@@ -276,6 +294,36 @@ export async function checkAndIndexUpdatedPages(
   return result;
 }
 
+/** Default debounce delay for auto-indexing on DB changes (ms). */
+const DEFAULT_AUTO_INDEX_DEBOUNCE_MS = 300_000; // 5 minutes
+
+/** Current debounce delay, configurable via plugin settings. */
+let _autoIndexDebounceMs = DEFAULT_AUTO_INDEX_DEBOUNCE_MS;
+
+/** Update the auto-index debounce delay (in seconds, from settings). */
+export function setAutoIndexDebounceSeconds(seconds: number): void {
+  _autoIndexDebounceMs = Math.max(10, seconds) * 1000; // minimum 10 seconds
+}
+
+/** Module-level debounce timer for the auto-indexer's onChanged callback. */
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Tracks whether the auto-embed toggle is enabled. */
+let _autoEmbedEnabled = true;
+
+/** Update the auto-embed enabled state used by the onChanged suppression guard. */
+export function setAutoEmbedEnabled(enabled: boolean): void {
+  _autoEmbedEnabled = enabled;
+}
+
+/** Cancel any pending auto-index debounce timer. */
+export function cancelAutoIndexDebounce(): void {
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+}
+
 export function startPageIndexingOnChange(
   apiKey: string,
   oramaInstance: OramaInstance | undefined,
@@ -283,7 +331,8 @@ export function startPageIndexingOnChange(
   model: string = DEFAULT_EMBEDDING_MODEL,
   storageProvider: StorageProvider,
   embeddingEndpoint?: string,
-  embeddingProvider?: EmbeddingProvider
+  embeddingProvider?: EmbeddingProvider,
+  accelerator?: VectorSearchAccelerator
 ): void {
   currentApiKey = apiKey;
   currentEmbeddingKey = embeddingApiKey;
@@ -292,16 +341,27 @@ export function startPageIndexingOnChange(
   currentStorageProvider = storageProvider;
   currentEmbeddingEndpoint = embeddingEndpoint ?? '';
   currentEmbeddingProvider = embeddingProvider ?? 'openai';
+  currentAccelerator = accelerator;
 
   if (hasHooked) return;
   hasHooked = true;
 
-  logseq.DB.onChanged(async () => {
+  logseq.DB.onChanged(() => {
     if (getIsUpdatingSettings()) return;
-    try {
-      await checkAndIndexUpdatedPages(currentApiKey, currentOramaInstance, currentEmbeddingKey, currentModel, currentStorageProvider, currentEmbeddingEndpoint, currentEmbeddingProvider);
-    } catch (err) {
-      console.error('Error indexing updated pages:', err);
+    if (shouldSuppressAutoIndex(_autoEmbedEnabled)) return;
+
+    // Clear any pending debounce timer and restart the wait
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
     }
+
+    debounceTimer = setTimeout(async () => {
+      debounceTimer = null;
+      try {
+        await checkAndIndexUpdatedPages(currentApiKey, currentOramaInstance, currentEmbeddingKey, currentModel, currentStorageProvider, currentEmbeddingEndpoint, currentEmbeddingProvider, currentAccelerator);
+      } catch (err) {
+        console.error('Error indexing updated pages:', err);
+      }
+    }, _autoIndexDebounceMs);
   });
 }

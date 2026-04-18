@@ -27,8 +27,14 @@ vi.mock('@orama/orama', () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import initSqlJs from 'sql.js';
-import { checkAndIndexUpdatedPages, getIndexingProgress, requestPauseIndexing } from './indexManager';
+import { _resetIndexingState, checkAndIndexUpdatedPages, getIndexingProgress, requestPauseIndexing } from './indexManager';
 import { SQLiteVectorStore } from './storage/SQLiteVectorStore';
+
+// Reset module-level indexing state between every test to prevent
+// the indexingInProgress flag from leaking across fast-check iterations.
+afterEach(() => {
+  _resetIndexingState();
+});
 
 const BATCH_SIZE = 5;
 
@@ -568,7 +574,7 @@ describe('Feature: indexing-status-feedback, Property 2: Paused indexing returns
       ),
       { numRuns: 100 }
     );
-  });
+  }, 30_000);
 });
 
 

@@ -136,17 +136,29 @@ Controlled by the `indexingMode` plugin setting.
 - Processes pages in batches of 5 concurrent API calls
 - Clears the block reference cache before starting
 
+> ⚠️ **Switch back to incremental after a full re-index.** Leaving `indexingMode` set to `"full"` means every future Re-Index click will wipe all existing embeddings and re-embed from scratch, wasting API credits and time. Full mode is intended as a one-time recovery tool, not a permanent setting.
+
 ## Indexing Triggers
 
 There are three ways embedding/indexing occurs:
 
 ### 1. Manual Re-Index (Re-Index DB button)
 
-The user clicks the "🔄 Re-Index" button in the chat panel toolbar. This calls `indexEntireLogSeq()` which behaves according to the `indexingMode` setting (incremental or full). While indexing is in progress, the button changes to "⏹ Stop" — clicking it stops the indexing loop after the current page finishes.
+The user clicks the "🔄 Re-Index" button in the chat panel toolbar. This calls `indexEntireLogSeq()` which behaves according to the `indexingMode` setting (incremental or full). While indexing is in progress, the button changes to "⏹ Stop" — clicking it stops the indexing loop after the current page finishes processing.
+
+After a user-initiated stop, a 60-second cooldown period begins:
+
+- During cooldown, the Re-Index button is disabled (grayed out) and does not respond to clicks
+- During cooldown, the auto-indexer is suppressed — all `logseq.DB.onChanged()` events are ignored and no new indexing runs are scheduled
+- When the cooldown expires, the button re-enables and the auto-indexer resumes normal operation
+
+The cooldown only applies to user-initiated stops. Normal indexing completion and error completion do not trigger a cooldown — the button returns to the enabled "🔄 Re-Index" state immediately.
 
 ### 2. Auto-Indexing on Page Changes
 
 When the plugin loads, it registers a `logseq.DB.onChanged()` listener via `enableAutoIndexer()`. Any database change in Logseq (page edits, new pages, etc.) triggers `checkAndIndexUpdatedPages()`, which performs incremental indexing for changed pages.
+
+A toggle switch ("Auto-Embed: On/Off") in the toolbar controls whether the `onChanged` listener schedules indexing. When the toggle is disabled, database changes are ignored by the auto-indexer and no new indexing runs are scheduled. When re-enabled, auto-indexing resumes after the standard 30-second debounce. The toggle state is persisted via `logseq.settings` (key: `autoEmbedEnabled`, default: `true`) and restored on plugin load. Manual re-indexing via the Re-Index button works regardless of the toggle state.
 
 A guard flag (`isUpdatingSettings`) prevents cascading re-indexing loops. When the plugin persists the vector database to settings, the resulting `onChanged` event is ignored.
 
@@ -178,12 +190,15 @@ A per-run cache prevents redundant `logseq.Editor.getBlock()` calls for the same
 When the user sends a query:
 
 1. The query text is embedded using the selected embedding model
-2. The embedding is searched against the `documents` table using brute-force cosine similarity in JavaScript
+2. The embedding is searched against the in-memory HNSW index via `VectorSearchAccelerator` for fast approximate nearest neighbor search (sub-5ms at 20k+ chunks). If the HNSW index is not ready, the search falls back to brute-force cosine similarity in `SQLiteVectorStore`.
 3. Search parameters:
    - **Similarity threshold**: 0.5 (minimum cosine similarity)
    - **Result limit**: 5 most similar chunks
+   - **HNSW efSearch**: 64 (query-time search depth, ≥95% recall vs exact search)
 4. Results are reranked using Reciprocal Rank Fusion (RRF) before being injected into the LLM prompt
 5. The content of matching chunks is appended to the LLM prompt as "Additional Context from Knowledge Base"
+
+The HNSW index is built from all embeddings in the SQLite `documents` table at startup using [hnswlib-wasm](https://github.com/nicktobey/hnswlib-wasm) (a WebAssembly build of hnswlib). It is volatile (in-memory only) — SQLite remains the source of truth. Incremental updates keep the index synchronized during a session, and a full rebuild is triggered when the embedding dimension changes or tombstone accumulation exceeds 20%.
 
 If vector search fails for any reason, the query proceeds without additional context — only the current page context is used as fallback.
 
@@ -202,6 +217,16 @@ When using the `settings` storage backend, vector search still goes through the 
 - **Database corruption**: If the persisted database can't be restored, a fresh database is created automatically
 - **Per-page resilience** (auto-indexer): If embedding fails for one page during auto-indexing, the error is logged and indexing continues for remaining pages
 - **Reference resolution failure**: If a block reference can't be fetched, the original `((uuid))` syntax is kept
+
+## Startup Performance
+
+The plugin uses several techniques to avoid blocking Logseq's main thread during startup:
+
+- **Lazy tokenizer loading**: The cl100k_base encoding table (~1.5 MB of JSON data) is loaded via dynamic `import()` on first use rather than at bundle parse time. This reduces the main bundle from ~1,740 KB to ~512 KB.
+- **Lazy storage provider**: A proxy wraps the real `SQLiteVectorStore` and defers WASM compilation and database restoration until the first method call. Initialization is scheduled via `requestIdleCallback` so it runs when the browser is idle.
+- **Vite chunk splitting**: Heavy dependencies (sql.js, Orama, tiktoken) are split into separate chunks via `manualChunks` in the Vite config, so they load on demand rather than at startup.
+- **Yield points**: `SQLiteVectorStore.initialize()` yields to the event loop between WASM loading and database restoration, allowing the host app to process window messages.
+- **Immediate toolbar registration**: The toolbar button and UI model are registered synchronously in `main()` before any heavy work begins.
 
 ## Architecture Diagram
 
@@ -248,6 +273,12 @@ When using the `settings` storage backend, vector search still goes through the 
  │  - block_metadata table               │
  │  - Persisted to IndexedDB as binary   │
  │                                       │
+ │  VectorSearchAccelerator (HNSW)       │
+ │  - In-memory HNSW index (hnswlib-wasm)│
+ │  - Sub-5ms queries at 20k+ chunks     │
+ │  - Auto-fallback to brute-force       │
+ │  - Rebuilt from SQLite on startup     │
+ │                                       │
  │  Legacy fallback: Orama + Settings    │
  └───────────────────────────────────────┘
 ```
@@ -257,7 +288,9 @@ When using the `settings` storage backend, vector search still goes through the 
 | File                    | Responsibility                                              |
 |------------------------|-------------------------------------------------------------|
 | `src/embedManager.ts`  | Block flattening with UUID annotation, reference resolution, chunk grouping, block metadata extraction, provider-aware embedding generation (OpenAI + Ollama), endpoint resolution |
-| `src/storage/SQLiteVectorStore.ts` | Per-document storage, cosine similarity search, block metadata storage (`block_metadata` table), IndexedDB persistence |
+| `src/storage/SQLiteVectorStore.ts` | Per-document storage, cosine similarity search (brute-force fallback), `getAllEmbeddings()` for HNSW index construction, block metadata storage (`block_metadata` table), IndexedDB persistence, `getPageCount()` for distinct page statistics |
+| `src/storage/VectorSearchAccelerator.ts` | In-memory HNSW index for fast approximate nearest neighbor search; wraps SQLiteVectorStore with automatic fallback |
+| `src/storage/VectorSearchAccelerator.types.ts` | Configuration interfaces and default HNSW parameters |
 | `src/storage/cosineSimilarity.ts` | Embedding BLOB encode/decode, cosine similarity computation |
 | `src/storage/migrateLegacy.ts` | Migration from legacy Orama JSON blob to per-document rows |
 | `src/storage/StorageProvider.ts` | StorageProvider interface (per-document + legacy methods) |
@@ -265,4 +298,9 @@ When using the `settings` storage backend, vector search still goes through the 
 | `src/indexManager.ts`  | Incremental indexing, auto-index on change, re-index guard, threads embeddingEndpoint/embeddingProvider to embedding calls |
 | `src/manager.ts`       | Orchestration: manual re-index, auto-indexer, query handling, passes provider settings to all embedding calls |
 | `src/VectorDBManager.ts` | Legacy Orama database CRUD, persistence, vector search (settings backend only) |
-| `src/settings.ts`      | Plugin settings schema including indexing mode, embedding model, embedding provider, embedding endpoint, and storage backend |
+| `src/cooldownManager.ts` | Cooldown timer management, auto-indexer suppression logic |
+| `src/buttonState.ts`   | Pure function for deriving re-index button visual state |
+| `src/components/AutoEmbedToggle.tsx` | Toggle switch component for enabling/disabling auto-embed |
+| `src/settings.ts`      | Plugin settings schema including indexing mode, embedding model, embedding provider, embedding endpoint, storage backend, and `autoEmbedEnabled` |
+| `src/tokenizer.ts`     | Lazy-loaded cl100k_base tokenizer wrapper; uses dynamic `import()` for the ~1.5 MB encoding table to keep the main bundle small (~512 KB) |
+| `src/main.tsx`         | Plugin entry point with lazy storage provider proxy that defers SQLite/WASM initialization until first use, preventing startup blocking |

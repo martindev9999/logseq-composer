@@ -27,6 +27,9 @@ export interface StorageProvider {
   /** Get the total number of documents in the store. */
   getDocumentCount?(): Promise<number>;
 
+  /** Get the number of distinct pages (unique base IDs, stripping _chunk_N suffixes). */
+  getPageCount?(): Promise<number>;
+
   /** Remove all document rows and flush to IndexedDB */
   clear(): Promise<void>;
 
